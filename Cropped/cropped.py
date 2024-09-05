@@ -1,271 +1,449 @@
 import cv2
 import os
-import glob
+import tkinter as tk
+from tkinter import filedialog
+from PIL import Image, ImageTk
 import numpy as np
-from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit, \
-    QLabel, QFileDialog, QGraphicsView, QGraphicsScene, QMenuBar, QAction, QMessageBox
-from PyQt5.QtGui import QImage, QPixmap
-from PyQt5.QtCore import Qt
+
+# List to hold keypoints, bounding box, and actions
+keypoints = []
+bounding_box = []
+actions = []  # List to track actions
+image_paths = []
+current_image_index = 0
+image = None
+original_image = None
+scaling_factor = 1.0
+mode = "point"  # Default mode
+save_directory = "."  # Default save directory
+
+# Create the Tkinter root window first
+root = tk.Tk()
+root.title("Image Keypoint Labeling")
+
+# Variable for Auto Box checkbox
+auto_box_enabled = tk.BooleanVar()
 
 
-class ImageCropper(QMainWindow):
-    def __init__(self):
-        super().__init__()
-        self.setWindowTitle("Image Cropper")
-        self.setGeometry(100, 100, 1200, 600)
+def on_canvas_click(event):
+    global bounding_box, keypoints, mode, actions, image
+    x, y = int(event.x / scaling_factor), int(event.y / scaling_factor)
+    if mode == "box":
+        if len(bounding_box) == 0:
+            # Start the bounding box selection
+            bounding_box.append((x, y))
+            canvas.bind("<Motion>", on_mouse_move)  # Bind mouse motion for preview
+        elif len(bounding_box) == 1:
+            # Complete the bounding box selection
+            bounding_box.append((x, y))
+            # Clear previous preview
+            canvas.delete("preview_box")
+            draw_bounding_box()
+            actions.append(('box', bounding_box.copy()))
+            canvas.unbind("<Motion>")
+    elif mode == "point":
+        keypoints.append((x, y))
+        actions.append(('point', (x, y)))
+        draw_keypoint(x, y)
+        if auto_box_enabled.get():  # Update bounding box if auto_box is enabled
+            update_image_with_points()
+            auto_box()
 
-        self.current_image = None
-        self.cropped_images = {}  # Dictionary to store cropped images for each index
-        self.log_entries = {}  # Dictionary to store log entries for each image index
-        self.image_files = []
-        self.current_index = 0
-
-        self.initUI()
-        self.create_menu()
-
-
-    def initUI(self):
-        self.central_widget = QWidget()
-        self.setCentralWidget(self.central_widget)
-
-        self.layout = QVBoxLayout()
-        self.central_widget.setLayout(self.layout)
-
-        # Image display areas
-        self.image_layout = QHBoxLayout()
-        self.layout.addLayout(self.image_layout)
-
-        # Original image view
-        self.original_view = QGraphicsView()
-        self.original_scene = QGraphicsScene()
-        self.original_view.setScene(self.original_scene)
-        self.image_layout.addWidget(self.original_view)
-
-        # Cropped image view
-        self.cropped_view = QGraphicsView()
-        self.cropped_scene = QGraphicsScene()
-        self.cropped_view.setScene(self.cropped_scene)
-        self.image_layout.addWidget(self.cropped_view)
-
-        # Input fields for cropping
-        self.input_layout = QHBoxLayout()
-        self.layout.addLayout(self.input_layout)
-
-        self.start_x_input = QLineEdit(self)
-        self.start_x_input.setPlaceholderText("Start X")
-        self.input_layout.addWidget(self.start_x_input)
-
-        self.start_y_input = QLineEdit(self)
-        self.start_y_input.setPlaceholderText("Start Y")
-        self.input_layout.addWidget(self.start_y_input)
-
-        self.end_x_input = QLineEdit(self)
-        self.end_x_input.setPlaceholderText("End X")
-        self.input_layout.addWidget(self.end_x_input)
-
-        self.end_y_input = QLineEdit(self)
-        self.end_y_input.setPlaceholderText("End Y")
-        self.input_layout.addWidget(self.end_y_input)
-
-        self.distance_x_input = QLineEdit(self)
-        self.distance_x_input.setPlaceholderText("Distance X")
-        self.input_layout.addWidget(self.distance_x_input)
-
-        self.distance_y_input = QLineEdit(self)
-        self.distance_y_input.setPlaceholderText("Distance Y")
-        self.input_layout.addWidget(self.distance_y_input)
-
-        # Control buttons
-        self.button_layout = QHBoxLayout()
-        self.layout.addLayout(self.button_layout)
-
-        self.load_button = QPushButton("Load Images")
-        self.load_button.clicked.connect(self.load_images)
-        self.button_layout.addWidget(self.load_button)
-
-        self.prev_button = QPushButton("Previous")
-        self.prev_button.clicked.connect(self.prev_image)
-        self.button_layout.addWidget(self.prev_button)
-
-        self.next_button = QPushButton("Next")
-        self.next_button.clicked.connect(self.next_image)
-        self.button_layout.addWidget(self.next_button)
-
-        self.crop_button = QPushButton("Crop and Save All")
-        self.crop_button.clicked.connect(self.crop_and_save_all)
-        self.button_layout.addWidget(self.crop_button)
-
-        # Log area for status messages
-        self.log_label = QLabel("")
-        self.layout.addWidget(self.log_label)
-
-    def create_menu(self):
-        menubar = self.menuBar()
-        about_menu = menubar.addMenu("Info")
-
-        about_action = QAction("About", self)
-        about_action.triggered.connect(self.show_about)
-        about_menu.addAction(about_action)
-
-    def show_about(self):
-        about_message = (
-            "Person doing the project: Alperen Bahar\n"
-            "Communication: alpb721@gmail.com"
-        )
-
-        msg_box = QMessageBox(self)
-        msg_box.setWindowTitle("Info")
-        msg_box.setText(about_message)
-        msg_box.setStandardButtons(QMessageBox.Ok)
-        msg_box.setIcon(QMessageBox.Information)
-
-        # Mesaj kutusunun estetik görünümü için aşağıdaki satırları ekleyebilirsiniz
-        msg_box.setStyleSheet("""
-            QMessageBox {
-                background-color: #f0f0f0;
-                font-size: 14px;
-            }
-            QPushButton {
-                min-width: 80px;
-                font-size: 12px;
-            }
-        """)
-
-        msg_box.exec_()
-
-    def load_images(self):
-        folder_path = QFileDialog.getExistingDirectory(self, "Select Image Folder")
-        if folder_path:
-            self.image_files = glob.glob(os.path.join(folder_path, '*.*'))
-            self.current_index = 0
-            self.show_image()
-
-    def show_image(self):
-        if self.image_files and 0 <= self.current_index < len(self.image_files):
-            image_file = self.image_files[self.current_index]
-            self.current_image = cv2.imread(image_file)
-            if self.current_image is not None:
-                # Display original image
-                resized_image = self.resize_image(self.current_image, 800, 600)
-                self.display_image(resized_image, self.original_scene)
-
-                # Display cropped image if available
-                if self.current_index in self.cropped_images:
-                    resized_cropped_image = self.resize_image(self.cropped_images[self.current_index], 600, 400)
-                    self.display_image(resized_cropped_image, self.cropped_scene)
-                else:
-                    self.cropped_scene.clear()
-
-                # Update log
-                log_entry = self.log_entries.get(self.current_index, f"Current image: {os.path.basename(image_file)}")
-                self.log_label.setText(log_entry)
-
-    def resize_image(self, image, max_width, max_height):
-        height, width = image.shape[:2]
-        scaling_factor = min(max_width / width, max_height / height)
-        new_size = (int(width * scaling_factor), int(height * scaling_factor))
-        return cv2.resize(image, new_size, interpolation=cv2.INTER_AREA)
-
-    def display_image(self, image, scene):
-        height, width = image.shape[:2]
-        qimg = QImage(image.data, width, height, 3 * width, QImage.Format_BGR888)
-        pixmap = QPixmap.fromImage(qimg)
-        scene.clear()
-        scene.addPixmap(pixmap)
-
-    def prev_image(self):
-        if self.image_files:
-            self.current_index = (self.current_index - 1) % len(self.image_files)
-            self.show_image()
-
-    def next_image(self):
-        if self.image_files:
-            self.current_index = (self.current_index + 1) % len(self.image_files)
-            self.show_image()
-
-    def crop_and_save_all(self):
-        if not self.image_files:
-            self.log_label.setText("No images loaded.")
-            return
-
-        start_x = self.get_input_value(self.start_x_input)
-        start_y = self.get_input_value(self.start_y_input)
-        end_x = self.get_input_value(self.end_x_input)
-        end_y = self.get_input_value(self.end_y_input)
-        distance_x = self.get_input_value(self.distance_x_input)
-        distance_y = self.get_input_value(self.distance_y_input)
-
-        save_folder = QFileDialog.getExistingDirectory(self, "Select Save Folder")
-        if not save_folder:
-            self.log_label.setText("Save folder not selected.")
-            return
-
-        for index, image_file in enumerate(self.image_files):
-            try:
-                image = cv2.imread(image_file)
-                cropped_image = crop_image(image, start_x, start_y, end_x, end_y, distance_x, distance_y)
-                if cropped_image.size > 0:
-                    file_name = os.path.basename(image_file)
-                    save_path = os.path.join(save_folder, f"cropped_{file_name}")
-                    cv2.imwrite(save_path, cropped_image)
-
-                    # Update log entries
-                    log_entry = f"Cropped photo saved: {save_path} (Original: {image_file})"
-                    self.log_entries[index] = log_entry
-
-                    # Store cropped image
-                    self.cropped_images[index] = cropped_image
-
-                    # If it's the current image, display the cropped image
-                    if index == self.current_index:
-                        resized_cropped_image = self.resize_image(cropped_image, 800, 600)
-                        self.display_image(resized_cropped_image, self.cropped_scene)
-                else:
-                    self.log_label.setText(f"No cropped image for {image_file}.")
-            except Exception as e:
-                self.log_label.setText(f"Error cropping image {image_file}: {e}")
-
-        self.log_label.setText("All images processed.")
-
-    def get_input_value(self, input_widget):
-        try:
-            return int(input_widget.text()) if input_widget.text() else None
-        except ValueError:
-            return None
+def create_thumbnail(image_path, size=(100, 100)):
+    """Create a thumbnail of the image."""
+    img = Image.open(image_path)
+    img.thumbnail(size)
+    return ImageTk.PhotoImage(img)
 
 
+def update_gallery():
+    """Update the gallery with thumbnails of all images."""
+    global gallery_frame_inner, image_paths, gallery_buttons, canvas
 
-def crop_image(image, start_x=None, start_y=None, end_x=None, end_y=None, distance_x=None, distance_y=None):
-    img_height, img_width = image.shape[:2]
+    # Clear the existing gallery
+    for widget in gallery_frame_inner.winfo_children():
+        widget.destroy()
 
-    if start_x is not None and start_y is not None and end_x is not None and end_y is not None:
-        crop_field = (start_x, start_y, end_x, end_y)
+    gallery_buttons = []
+    for path in image_paths:
+        thumbnail = create_thumbnail(path)
 
-    elif distance_x is not None and distance_y is not None:
-        if start_x is None:
-            start_x = 0
-        if start_y is None:
-            start_y = 0
+        # Create a frame for the thumbnail and its label
+        frame = tk.Frame(gallery_frame_inner, bg='white')
+        frame.pack(pady=5, anchor='w')
 
-        end_x = start_x + distance_x
-        end_y = start_y + distance_y
+        # Create a button for the thumbnail
+        button = tk.Button(frame, image=thumbnail, command=lambda p=path: load_image(p))
+        button.image = thumbnail  # Keep a reference to avoid garbage collection
+        button.pack()
 
-        crop_field = (start_x, start_y, min(end_x, img_width), min(end_y, img_height))
+        # Create a label for the image name
+        label = tk.Label(frame, text=os.path.basename(path))
+        label.pack()
 
+        gallery_buttons.append(button)
+
+        # Update the scroll region
+    canvas.config(scrollregion=canvas.bbox("all"))
+
+
+def on_mouse_move(event):
+    global bounding_box, image
+
+    if len(bounding_box) == 1:
+        # Calculate the current position to show the preview
+        x, y = int(event.x / scaling_factor), int(event.y / scaling_factor)
+        temp_box = [bounding_box[0], (x, y)]
+
+        # Clear previous preview
+        canvas.delete("preview_box")
+
+        # Draw preview box
+        x1, y1 = temp_box[0]
+        x2, y2 = temp_box[1]
+        canvas.create_rectangle(x1 * scaling_factor, y1 * scaling_factor,
+                                x2 * scaling_factor, y2 * scaling_factor,
+                                outline="red", width=2, tag="preview_box")
+
+def calculate_bbox_details(box):
+    x1, y1 = box[0]
+    x2, y2 = box[1]
+    center_x = (x1 + x2) / 2
+    center_y = (y1 + y2) / 2
+    width = abs(x2 - x1)
+    height = abs(y2 - y1)
+    return center_x, center_y, width, height
+
+
+def draw_bounding_box():
+    global image, bounding_box, canvas, image_on_canvas
+    canvas.delete("bounding_box")  # Remove previous bounding box
+    if bounding_box:
+        x1, y1 = bounding_box[0]
+        x2, y2 = bounding_box[1]
+        cv2.rectangle(image, (int(x1 * scaling_factor), int(y1 * scaling_factor)),
+                      (int(x2 * scaling_factor), int(y2 * scaling_factor)), (0, 0, 255), 2)
+        show_image()
+
+
+def draw_keypoint(x, y):
+    global image, canvas, image_on_canvas
+    cv2.circle(image, (int(x * scaling_factor), int(y * scaling_factor)), 3, (0, 255, 0), -1)
+    show_image()
+
+
+def resize_image_to_fit(image, max_width, max_height):
+    global scaling_factor
+    height, width, _ = image.shape
+    scaling_factor = min(max_width / width, max_height / height)
+    new_width = int(width * scaling_factor)
+    new_height = int(height * scaling_factor)
+    return cv2.resize(image, (new_width, new_height)), scaling_factor
+
+
+def load_image(image_path):
+    global image, original_image, keypoints, bounding_box, scaling_factor, actions
+    keypoints = []
+    bounding_box = []
+    actions = []  # Reset actions list when a new image is loaded
+    original_image = cv2.imread(image_path)
+    image, scaling_factor = resize_image_to_fit(original_image, canvas.winfo_width(), canvas.winfo_height())
+    load_annotations(image_path)
+    show_image()
+
+
+def show_image():
+    global image, canvas, image_on_canvas
+    bgr_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    pil_image = Image.fromarray(bgr_image)
+    tk_image = ImageTk.PhotoImage(pil_image)
+
+    # Check if image is already on canvas and update it
+    if 'image_on_canvas' in globals():
+        canvas.itemconfig(image_on_canvas, image=tk_image)
     else:
-        raise ValueError("Invalid coordinates or distances provided")
-
-    x1, y1, x2, y2 = crop_field
-    if x1 >= x2 or y1 >= y2:
-        raise ValueError("Crop area Invalid")
-
-    cropped_image = image[y1:y2, x1:x2]
-
-    return cropped_image
+        image_on_canvas = canvas.create_image(0, 0, anchor=tk.NW, image=tk_image)
+    canvas.image = tk_image
 
 
-if __name__ == "__main__":
-    app = QApplication([])
-    window = ImageCropper()
-    window.show()
-    app.exec_()
+def save_annotations():
+    global bounding_box, keypoints, original_image, save_directory
+
+    # Check if a bounding box exists; if not, create one
+    if len(bounding_box) != 2 and keypoints:
+        auto_box()
+
+    # If still no bounding box, skip saving
+    if len(bounding_box) != 2:
+        return
+
+    height, width, _ = original_image.shape
+    object_label = 0  # Example object label
+    txt_file_name = os.path.join(save_directory,
+                                 f"{os.path.splitext(os.path.basename(image_paths[current_image_index]))[0]}.txt")
+
+    with open(txt_file_name, "w") as file:
+        if len(bounding_box) == 2:
+            center_x, center_y, bbox_width, bbox_height = calculate_bbox_details(bounding_box)
+            file.write(
+                f"{object_label} {center_x / width} {center_y / height} {bbox_width / width} {bbox_height / height} ")
+
+        for (x, y) in keypoints:
+            normalized_x = x / width
+            normalized_y = y / height
+            file.write(f"{normalized_x} {normalized_y} ")
+
+
+def load_annotations(image_path):
+    global bounding_box, keypoints, original_image, actions
+    height, width, _ = original_image.shape
+    txt_file_name = os.path.join(save_directory, f"{os.path.splitext(os.path.basename(image_path))[0]}.txt")
+    if os.path.exists(txt_file_name):
+        with open(txt_file_name, "r") as file:
+            data = file.read().split()
+            if len(data) >= 5:
+                center_x = float(data[1]) * width
+                center_y = float(data[2]) * height
+                bbox_width = float(data[3]) * width
+                bbox_height = float(data[4]) * height
+                x1 = center_x - bbox_width / 2
+                y1 = center_y - bbox_height / 2
+                x2 = center_x + bbox_width / 2
+                y2 = center_y + bbox_height / 2
+                bounding_box = [(int(x1), int(y1)), (int(x2), int(y2))]
+                actions.append(('box', bounding_box.copy()))
+                draw_bounding_box()
+
+            keypoints.clear()
+            for i in range(5, len(data), 2):
+                x = float(data[i]) * width
+                y = float(data[i + 1]) * height
+                keypoints.append((int(x), int(y)))
+                actions.append(('point', (int(x), int(y))))
+                draw_keypoint(int(x), int(y))
+
+
+def next_image():
+    global current_image_index, image_paths
+    if current_image_index < len(image_paths) - 1:
+        current_image_index += 1
+        load_image(image_paths[current_image_index])
+
+
+def previous_image():
+    global current_image_index, image_paths
+    if current_image_index > 0:
+        current_image_index -= 1
+        load_image(image_paths[current_image_index])
+
+
+def reset_image():
+    global keypoints, bounding_box, image_paths, actions
+    keypoints = []
+    bounding_box = []
+    actions = []
+    load_image(image_paths[current_image_index])
+
+    # Delete the text file
+    txt_file_name = os.path.join(save_directory,
+                                 f"{os.path.splitext(os.path.basename(image_paths[current_image_index]))[0]}.txt")
+    if os.path.exists(txt_file_name):
+        os.remove(txt_file_name)
+
+def select_directory():
+    global image_paths, current_image_index, save_directory
+    directory = filedialog.askdirectory()
+    if directory:
+        save_directory = directory  # Update the save directory
+        image_paths = [os.path.join(directory, f) for f in os.listdir(directory) if f.endswith(('jpg', 'jpeg', 'png'))]
+        if image_paths:
+            current_image_index = 0
+            load_image(image_paths[current_image_index])
+            update_gallery()  # Update the gallery
+
+
+def create_thumbnail(image_path, size=(100, 100)):
+    """Create a thumbnail of the image."""
+    img = Image.open(image_path)
+    img.thumbnail(size)
+    return ImageTk.PhotoImage(img)
+
+
+def update_gallery():
+    """Update the gallery with thumbnails of all images."""
+    global gallery_frame, image_paths, gallery_buttons
+
+    # Clear the existing gallery
+    for widget in gallery_frame.winfo_children():
+        widget.destroy()
+
+    gallery_buttons = []
+    for path in image_paths:
+        # Create a thumbnail
+        thumbnail = create_thumbnail(path)
+
+        # Create a frame for the thumbnail and its label
+        frame = tk.Frame(gallery_frame)
+        frame.pack(pady=5)
+
+        # Create a button for the thumbnail
+        button = tk.Button(frame, image=thumbnail, command=lambda p=path: load_image(p))
+        button.image = thumbnail  # Keep a reference to avoid garbage collection
+        button.pack()
+
+        # Create a label for the image name
+        label = tk.Label(frame, text=os.path.basename(path))
+        label.pack()
+
+        gallery_buttons.append(button)
+
+
+def set_mode(new_mode):
+    global mode
+    mode = new_mode
+
+
+def auto_box():
+    global bounding_box, keypoints, image
+    if not keypoints:
+        return
+    x_coords = [p[0] for p in keypoints]
+    y_coords = [p[1] for p in keypoints]
+    x1, y1 = min(x_coords), min(y_coords)
+    x2, y2 = max(x_coords), max(y_coords)
+    bounding_box = [(x1, y1), (x2, y2)]
+    actions.append(('box', bounding_box.copy()))
+    draw_bounding_box()
+
+
+def update_image_with_points():
+    global keypoints, image, scaling_factor
+    keypoints_temp = keypoints
+    reset_image()
+    keypoints = keypoints_temp
+    # Redraw all points
+    for x, y in keypoints:
+        draw_keypoint(x, y)
+    # Redraw bounding box if it exists
+    if bounding_box:
+        draw_bounding_box()
+    show_image()
+
+
+def resize_canvas(event):
+    if image_paths:
+        canvas_width = event.width
+        canvas_height = event.height
+        load_image(image_paths[current_image_index])
+
+def bind_keys():
+    root.bind('o', lambda event: select_directory())
+    root.bind('<Left>', lambda event: previous_image())
+    root.bind('a', lambda event: previous_image())
+    root.bind('<Right>', lambda event: next_image())
+    root.bind('d', lambda event: next_image())
+    root.bind('r', lambda event: reset_image())
+    root.bind('s', lambda event: save_annotations())
+    root.bind('z', lambda event: set_mode("point"))
+    root.bind('x', lambda event: set_mode("box"))
+    root.bind('b', lambda event: toggle_auto_box())
+
+def toggle_auto_box():
+    auto_box_enabled.set(not auto_box_enabled.get())
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Frame for buttons and gallery (buttons on top, gallery at the bottom)
+button_and_gallery_frame = tk.Frame(root)
+button_and_gallery_frame.pack(side=tk.RIGHT, fill=tk.Y)
+
+
+
+# Create a frame for the buttons and canvas
+frame = tk.Frame(root)
+frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+# Canvas for displaying the image
+canvas = tk.Canvas(frame)
+canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+button_frame = tk.Frame(button_and_gallery_frame)
+button_frame.pack(side=tk.TOP, fill=tk.X)
+
+select_dir_button = tk.Button(button_frame, text="Select Directory (o)", command=select_directory)
+select_dir_button.pack(pady=5)
+
+previous_image_button = tk.Button(button_frame, text="Previous Image (<- or a)", command=previous_image)
+previous_image_button.pack(pady=5)
+
+next_image_button = tk.Button(button_frame, text="Next Image (-> or d)", command=next_image)
+next_image_button.pack(pady=5)
+
+
+
+
+
+reset_button = tk.Button(button_frame, text="Reset Image (r)", command=reset_image)
+reset_button.pack(pady=5)
+
+save_annotations_button = tk.Button(button_frame, text="Save Annotations (s)", command=save_annotations)
+save_annotations_button.pack(pady=5)
+
+point_button = tk.Button(button_frame, text="Point Mode (z)", command=lambda: set_mode("point"))
+point_button.pack(pady=5)
+
+box_button = tk.Button(button_frame, text="Box Mode (x)", command=lambda: set_mode("box"))
+box_button.pack(pady=5)
+
+# Frame for gallery
+gallery_frame = tk.Frame(button_and_gallery_frame)
+gallery_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True)
+
+
+
+# Create the gallery canvas with a fixed width
+gallery_canvas = tk.Canvas(gallery_frame, width=150)  # Set the width to match gallery_frame width
+gallery_scroll_y = tk.Scrollbar(gallery_frame, orient=tk.VERTICAL, command=gallery_canvas.yview)
+
+# Create a frame to hold the gallery items
+gallery_frame = tk.Frame(gallery_canvas)
+
+# Add the frame to the canvas
+gallery_canvas.create_window((0, 0), window=gallery_frame, anchor=tk.NW)
+gallery_frame.bind("<Configure>", lambda e: gallery_canvas.configure(scrollregion=gallery_canvas.bbox("all")))
+
+
+# Pack the scroll bars and canvas
+gallery_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+gallery_scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+gallery_canvas.configure(yscrollcommand=gallery_scroll_y.set)
+
+auto_box_checkbutton = tk.Checkbutton(button_frame, text="Auto Box (b)", variable=auto_box_enabled, onvalue=True,
+                                      offvalue=False)
+auto_box_checkbutton.pack(pady=5)
+
+# Call bind_keys to set up key bindings
+bind_keys()
+
+# Bind the resize event to adjust canvas size
+root.bind("<Configure>", resize_canvas)
+
+# Bind the mouse click event to canvas
+canvas.bind("<Button-1>", on_canvas_click)
+
+root.mainloop()
